@@ -1,0 +1,137 @@
+from sqlalchemy import create_engine
+import pymysql
+import pandas as pd
+import numpy as np
+from pykrx import stock
+import datetime
+import time
+import pymysql
+
+  
+class StockDB():
+    #__init__으로 객체의 초기값을 정해준다. 가장 우선적임.
+    def __init__(self, password):
+        index_tickers_kospi=stock.get_index_ticker_list()
+        index_tickers_kosdaq=stock.get_index_ticker_list(market='KOSDAQ')
+        self.index_tickers=index_tickers_kospi+index_tickers_kosdaq
+        self.engine = create_engine("mysql+pymysql://root:"+password+"@127.0.0.1:3306/etf_stock", encoding='utf-8')
+        self.conn = pymysql.connect(host='127.0.0.1', user='root', password=password, db='etf_stock', charset='utf8')
+        self.cursor = self.conn.cursor()
+
+    #하나의 커서를 사용해라
+    def get_df(self,table_name):
+        cursor=self.conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("select * from "+table_name)
+        rows=cursor.fetchall()
+        df=pd.DataFrame(rows)
+        return df
+
+    def _create_database(self,password):
+        try:
+            conn = pymysql.connect(host='127.0.0.1:3306', user='root', password=password, charset='utf8')
+            cursor = conn.cursor()
+        # SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = \'test\'로 데이터베이스가 있는지 없는지 알수있다. 
+            sql = 'SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = \'etf_stock\''
+            result = cursor.execute(sql)
+
+            if result == 0:
+                sql = 'CREATE DATABASE etf_stock'
+                cursor.execute(sql)
+                conn.commit()
+        except:
+            return False
+        return True
+
+    def close(self):
+        self.conn.close()
+
+    def select_max_date(self,table_name):
+        #날짜에서 가장 최근을 알아온다.
+        sql = 'select max(날짜) from ' + table_name
+        self.cursor.execute(sql)
+        result = self.cursor.fetchone()
+        return result[0]
+
+    def insert_chart(self,data,table_name):
+        data.to_sql(name=table_name, con=self.engine, if_exists='append')
+        self.conn.commit()
+
+    # def first_chart(self,data,table_name):
+    #     data.to_sql(name=table_name, con=self.engine, if_exists='replace')
+    #     self.conn.commit()
+
+    def create_table(self,table_name):
+    #table_name가진 table 유무확인
+        sql = 'SHOW TABLES LIKE \'' + table_name + '\''
+        result = self.cursor.execute(sql)
+        if result == 0:
+    #table없다면 만들어준다.
+            sql = 'create table ' + table_name + '(stock_id int,index_id int,거래대금 bigint,거래량 bigint,고가 double,날짜 date,시가 Double,저가 Double,종가 Double,INDEX (날짜));'
+            self.cursor.execute(sql)
+            self.conn.commit()
+
+    def firstUpdateIndex(self,start):
+        print(self.index_tickers[0])
+        index_table=stock.get_index_ohlcv_by_date(start,str(datetime.date.today()).replace('-',''),self.index_tickers[0])
+        index_table['index_id']=self.index_tickers[0]
+        for i,ticker in enumerate(self.index_tickers):
+            if i>0:
+                df=stock.get_index_ohlcv_by_date(start,str(datetime.date.today()).replace('-',''),ticker)
+                df['index_id']=ticker
+                index_table = pd.concat([index_table,df])
+                # index_table.append(df)
+                time.sleep(0.25)
+            
+        self.insert_chart(index_table,'_index')
+        
+    def firstUpdateStock(self,indexTicker,start):
+        stock_tickers=stock.get_index_portfolio_deposit_file(indexTicker)
+
+        for i,ticker in enumerate(stock_tickers):
+            if i==0:
+                stock_table=stock.get_market_ohlcv_by_date(start,str(datetime.date.today()).replace('-',''),ticker)
+                stock_table['stock_id']=ticker
+            else:
+                df=stock.get_market_ohlcv_by_date(start,str(datetime.date.today()).replace('-',''),ticker)
+                df['stock_id']=ticker
+                stock_table = pd.concat([stock_table,df])
+                time.sleep(0.25)
+
+        stock_table['index_id']=indexTicker
+        self.insert_chart(stock_table,'kr_stock')
+
+    def updateIndex(self):
+        updateIndex=self.select_max_date('_index')
+        if updateIndex==datetime.date.today():
+            return print('이미 업데이트 되었습니다')
+        
+        for i,ticker in enumerate(self.index_tickers):
+            if i==0:
+                index_table=stock.get_index_ohlcv_by_date(str(updateIndex+datetime.timedelta(days=1)).replace('-',''),str(datetime.date.today()).replace('-',''),ticker)
+                index_table['index_id']=ticker
+            else:
+                df=stock.get_index_ohlcv_by_date(str(updateIndex+datetime.timedelta(days=1)).replace('-',''),str(datetime.date.today()).replace('-',''),ticker)
+                df['index_id']=ticker
+                index_table = pd.concat([index_table,df])
+                time.sleep(0.25)
+
+        self.insert_chart(index_table,'_index')
+
+    def _stock(self,indexTicker):
+        updateStock=self.select_max_date('kr_stock')
+        if updateStock==datetime.date.today():
+            return print('이미 업데이트 되었습니다')
+
+        stock_tickers=stock.get_index_portfolio_deposit_file(indexTicker)
+        stock_table=stock.get_market_ohlcv_by_date(str(updateStock+datetime.timedelta(days=1)).replace('-',''),str(datetime.date.today()).replace('-',''),stock_tickers[0])
+        stock_table['stock_id']=stock_tickers[0]
+
+        for i,ticker in enumerate(stock_tickers):
+            if i>0:
+                df=stock.get_market_ohlcv_by_date(str(updateStock+datetime.timedelta(days=1)).replace('-',''),str(datetime.date.today()).replace('-',''),ticker)
+                df['stock_id']=ticker
+                stock_table=pd.concat([stock_table,df])
+                time.sleep(0.25)
+
+        stock_table['index_id']=indexTicker
+        self.insert_chart(stock_table,'kr_stock')
